@@ -1,0 +1,124 @@
+#!/home/dbrook/apps/bin/perl
+
+use strict;
+use warnings;
+
+package MyServer;
+
+use base qw(HTTP::Server::Simple::CGI);
+use HTTP::Server::Simple::Static;
+
+use File::Spec::Functions qw(canonpath);
+use IO::Dir;
+use POSIX qw(strftime);
+use Template;
+
+sub the_path {
+    my ( $self, $cgi, $base ) = @_;
+    my $path = $cgi->url( -absolute => 1, -path_info => 1 );
+
+    # Internet Explorer provides the full URI in the GET section
+    # of the request header, so remove the protocol, domain name,
+    # and port if they exist.
+    $path =~ s{^https?://([^/:]+)(:\d+)?/}{/};
+
+    # Sanitize the path and try it.
+    $path = $base . canonpath( URI::Escape::uri_unescape($path) );
+}
+
+sub handle_request {
+	my ( $self, $cgi ) = @_;
+
+	my $webroot = $ARGV[0];
+
+	$self->serve_static( $cgi, $webroot)
+		and return;
+
+	my $path = $self->the_path($cgi, $webroot); 
+	unless(-d $path) {
+         print "HTTP/1.0 404 Not found\r\n";
+         print $cgi->header,
+               $cgi->start_html('Not found'),
+               $cgi->h1('Not found'),
+               $cgi->end_html;
+		return;
+	}
+
+	my $base  = $cgi->url( -absolute => 1, -path_info => 1 );
+	my @files = sort IO::Dir->new($path)->read;
+	$webroot  =~ s[/$][];
+	print "HTTP/1.0 200 OK\r\n", $cgi->header(-charset => 'utf8');
+	Template->new->process($self->tmpl, {
+		webroot => $webroot,
+		path    => ($base eq '/' ? '' : $base),
+		files   => [
+			map +{
+				type => (-d "$path/$_" ? 'directory' : 'file'),
+				name => $_,
+				mtime => strftime('%a %b %d %H:%M:%S %Y', localtime [stat "$path/$_"]->[9]),
+			}, @files[2 .. $#files] 
+		],
+	});
+}
+
+sub tmpl {
+	(my $tmpl = <<"	TMPL") =~ s/^	//g;
+	<html>
+		<head>
+			<title>MyServer - [% path %]</title>
+			<style>
+			body {
+				background-color: #333;
+				color: GhostWhite;
+				font-family: sans-serif;
+			}
+			a {
+				color: LightSkyBlue;
+			}
+			a:visited {
+				color: Violet;
+			}
+			tbody {
+				font-family: monospace;
+			}
+			td.directory a:after {
+				content: '/';
+			}
+			td.time {
+				padding-left: 15px;
+			}
+			tfoot {
+				text-align: center;
+				font-weight: bold;
+			}
+			a:hover {
+				text-decoration: none;
+			}
+			</style>
+		</head>
+		<body>
+			<div align='center'>
+				<h1>Served from <tt>[% webroot %][% path %]</tt>
+				<table>
+					<thead><tr><th>Name</th><th>Last modified</th></thead>
+					<tfoot><tr><td>Name</td><td>Last modified</td></tfoot>
+					<tbody>
+					[%- FOREACH file IN files -%]
+						<tr>
+							<td class='name [% file.type %]'><a href="[% path %]/[% file.name %]">[% file.name %]</a></td>
+							<td class='time'>[% file.mtime %]</td>
+						</tr>
+					[%- END -%]
+				</table>
+			</div>
+		</body>
+	</html>
+	TMPL
+	return \$tmpl;
+}
+
+package main;
+
+@ARGV || die "Usage: http-server WEBROOT [PORT]\n";
+my $server = MyServer->new($ARGV[1] || 8008);
+$server->run();
